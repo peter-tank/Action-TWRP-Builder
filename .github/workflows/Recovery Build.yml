@@ -10,37 +10,37 @@ on:
       MANIFEST_BRANCH:
         description: 'MANIFEST_BRANCH'
         required: true
-        default: 'twrp-12.1'
+        default: 'twrp-11'
       DEVICE_TREE_URL:
         description: 'DEVICE_TREE_URL'
         required: true
-        default: 'https://github.com/TeamWin/android_device_asus_I003D'
+        default: 'https://github.com/peter-tank/twrp_vivo_PD2054'
       DEVICE_TREE_BRANCH:
         description: 'DEVICE_TREE_BRANCH'
         required: true
-        default: 'android-12.1'
+        default: 'main'
       DEVICE_PATH:
         description: 'DEVICE_PATH'
         required: true
-        default: 'device/asus/I003D'
+        default: 'device/vivo/PD2054'
+      DEVICE_NAME:
+        description: 'DEVICE_NAME'
+        required: true
+        default: 'PD2054'
+      MAKEFILE_NAME:
+        description: 'MAKEFILE_NAME'
+        required: true
+        default: 'twrp_PD2054'
+      BUILD_TARGET:
+        description: 'BUILD_TARGET'
+        required: true
+        default: 'recovery'
       COMMON_TREE_URL:
         description: 'COMMON_TREE_URL (if no common tree, leave blank)'
         required: false
       COMMON_PATH:
         description: 'COMMON_PATH (if no common tree, leave blank)'
         required: false
-      DEVICE_NAME:
-        description: 'DEVICE_NAME'
-        required: true
-        default: 'I003D'
-      MAKEFILE_NAME:
-        description: 'MAKEFILE_NAME'
-        required: true
-        default: 'twrp_I003D'
-      BUILD_TARGET:
-        description: 'BUILD_TARGET'
-        required: true
-        default: 'recovery'
 
 jobs:
   build:
@@ -114,6 +114,9 @@ jobs:
     - name: Clone device tree
       run: |
         git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+        git -C ./${{ github.event.inputs.DEVICE_PATH }} log -n1 | tee device_tree-commit-log
+        echo "commit=$(git -C ./${{ github.event.inputs.DEVICE_PATH }} rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      id: device_tree
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Clone common tree
@@ -149,20 +152,49 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        echo "exit_code=$(echo -n "$?")" >> $GITHUB_STATE
+      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
+      id: make
+
+    - name: Setup upterm session(on-failure)
+      uses: lhotari/action-upterm@v1
+      with:
+        ## limits ssh access and adds the ssh public key for the user which triggered the workflow
+        limit-access-to-actor: true
+        ## limits ssh access and adds the ssh public keys of the listed GitHub users
+        limit-access-to-users: peter-tank
+        ## If no one connects after 10 minutes, shut down server.
+        wait-timeout-minutes: 10
+      if: always() && (steps.make.outcome == 'failure' || steps.make.outcome == 'cancelled')
+
+    - name: Create artifacts folder
+      shell: bash {0}
+      run: |
+        mkdir artifacts
+        ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+        rm -rf out/target/product/${{ github.event.inputs.DEVICE_NAME }}/{obj,obj_arm,symbols}
+        mv out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img ./artifacts/ || echo "Not img targets..."
+        mv out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip ./artifacts/ || echo "No package targets..."
+        mv out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img ./artifacts/ || echo "No vendor targets..."
+        tar -vcf artifacts/target_${{ github.event.inputs.DEVICE_NAME }}.tar.gz out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v1
       with:
-        files: | 
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img
-        name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
-        tag_name: ${{ github.run_id }}
+        files: |
+          workspace/artifacts/${{ github.event.inputs.BUILD_TARGET }}.img
+          workspace/artifacts/*.zip
+          workspace/artifacts/*vendor*.img
+          workspace/artifacts/target_${{ github.event.inputs.DEVICE_NAME }}.tar.gz
+        name: ${{ github.event.inputs.DEVICE_NAME }}-${{ steps.device_tree.outputs.commit }}
+        tag_name: ${{ steps.device_tree.outputs.commit }}
+        append_body: true
+        body_path: ${{ steps.pwd.outputs.workspace-folder }}/device_tree-commit-log
         body: |
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
           Device: ${{ github.event.inputs.DEVICE_NAME }}
+          Commit: ${{ github.event.inputs.DEVICE_TREE_URL }}/commit/${{ steps.device_tree.outputs.commit }}
           Target: ${{ github.event.inputs.BUILD_TARGET }}.img
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
